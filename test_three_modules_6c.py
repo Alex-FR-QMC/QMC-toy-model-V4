@@ -620,7 +620,13 @@ def run_phase_6c_a():
             dt=cfg_engine.dt,
         )
         h4 = d6c.evaluate_hypothesis_H4(h1, h2, h3, max_hd)
-        synthesis = d6c.synthesize_3_levels(h1, h2, h3, h4, extras_diagnostics[form])
+        # Pass morpho_active_channel to synthesizer (None for non-MORPHO forms)
+        morpho_ch = measurements[form].get('morpho_active_channel')
+        synthesis = d6c.synthesize_3_levels(
+            h1, h2, h3, h4, extras_diagnostics[form],
+            morpho_channel=morpho_ch,
+            coupling_form=form,
+        )
         hypotheses_per_form[form] = {
             'H1': h1, 'H2': h2, 'H3': h3, 'H4': h4,
             'synthesis_3_levels': synthesis,
@@ -635,6 +641,8 @@ def run_phase_6c_a():
               f"final_rel={h3.get('final_relative_change', 0):.4f})")
         print(f"    H4 (compression kills): {h4['verdict']}")
         print(f"    → Level: {synthesis['level']}")
+        if synthesis.get('morpho_active_channel_caveat'):
+            print(f"    ⚠ {synthesis['morpho_active_channel_caveat']}")
 
     # ---- 7. Verdict assembly ----
     print()

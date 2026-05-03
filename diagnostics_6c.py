@@ -12,13 +12,20 @@ Diagnostics defined here:
 
   - R_metric(state_i, state_j, coupling_form)
         cosine-similarity-based overlap on the perspectival novelty fields,
-        in [0, 1]. Loggued ALONGSIDE norm_ratio to detect intensity-only
+        in [0, 1]. Logged ALONGSIDE norm_ratio to detect intensity-only
         perspective vs shape perspective.
 
-  - delta_R = |R_psi - R_metric|
-        the structural-perspective signal: independent of F1, detects
-        whether the system is operationally label-based (ΔR ≈ 0) or
-        operationally perspectival (ΔR > 0).
+  - delta_R_perspectival = |R_metric(form) - R_metric(contrastive_baseline)|
+        the structural-perspective signal computed in the COMMON cosine
+        metric (both terms are cosine-based, so the metric difference
+        cancels out). Independent of F1, detects whether the form's field
+        differs structurally from the label-based baseline. This is the
+        H2 driver.
+
+        NOTE: an earlier version used |R_psi - R_metric|, which conflated
+        the Bhattacharyya/cosine metric gap with genuine perspective.
+        That version is kept ONLY as `compute_delta_R_legacy` for
+        diagnostic comparison, NOT used by H2.
 
   - phi_extra_diagnostics(extras_baseline, extras_form)
         amplification_ratio + pattern_dissimilarity + temporal_stability
@@ -27,7 +34,18 @@ Diagnostics defined here:
           * real perspectival pattern
           * dynamical artefact (high dissimilarity, low stability)
 
+  - diagnose_morpho_active_channel(prev_h_fields_history)
+        for MORPHO_ACTIVE only: verifies the |∂_t h| channel is dynamically
+        alive. If QUIESCENT, MORPHO_ACTIVE's perspective signal is
+        meaningless even if its pattern looks distinct. Used to apply a
+        CHANNEL_NOT_ALIVE caveat to the synthesis level.
+
   - hypotheses H1, H2, H3, H4 with explicit discrimination criteria.
+        H1: F1 differential (ratio AND absolute floor)
+        H2: ΔR_perspectival in common cosine metric
+        H3: F4 trajectory L1 + final-state criteria
+        H4: compression kills perspective (only if all of H1/H2/H3 are
+            negative AND warmup was sufficient)
 
 The h_div_min protocol:
 
@@ -698,36 +716,89 @@ def diagnose_morpho_active_channel(
 def synthesize_3_levels(
     h1: dict, h2: dict, h3: dict, h4: dict,
     extras_diag: dict,
+    morpho_channel: Optional[dict] = None,
+    coupling_form: str = '',
 ) -> dict:
     """
-    Three-level interpretation:
-      Level 1: NO_PERSPECTIVE  — H2 NOT_SUPPORTED (ΔR ≈ 0)
-      Level 2: STRUCTURAL_PERSPECTIVE — H2 SUPPORTED (ΔR > 0) AND
-                  extras_diag aggregate is REAL_PERSPECTIVE
-      Level 3: DYNAMICAL_EFFECT — Level 2 AND (H1 SUPPORTED OR H3 SUPPORTED)
+    Three-level interpretation, refined to avoid overclaiming "DYNAMICAL_EFFECT"
+    when only weak structural perspective is present.
+
+    Levels:
+      LEVEL_1_NO_PERSPECTIVE
+        H2 NOT_SUPPORTED — no structural perspective beyond label-based.
+
+      LEVEL_2_PARTIAL_STRUCTURAL_SIGNAL_ONLY
+        H2 SUPPORTED but extras aggregate not REAL_PERSPECTIVE — structural
+        ΔR signal exists but pattern/stability triple-constraint fails.
+
+      LEVEL_2_STRUCTURAL_PERSPECTIVE_NO_DYNAMIC_EFFECT
+        H2 SUPPORTED + extras REAL_PERSPECTIVE, no H1/H3 dynamic effect.
+
+      LEVEL_3_WEAK_STRUCTURAL_DYNAMIC
+        H1 SUPPORTED but H2 only WEAKLY_SUPPORTED — dynamic effect exists
+        but the structural perspective signal is weak. Likely numerical
+        amplification of a near-baseline pattern. Distinguished from full
+        LEVEL_3 to flag this caveat.
+
+      LEVEL_3_DYNAMICAL_EFFECT
+        H2 SUPPORTED + extras REAL_PERSPECTIVE + (H1 or H3) SUPPORTED.
+        Full structural perspective + measurable dynamic translation.
+
+    For MORPHO_ACTIVE, an additional caveat is applied if the |∂_t h|
+    channel is not ALIVE — the form's classification is downgraded with
+    a CHANNEL_NOT_ALIVE flag, since its perspective signal is meaningless
+    if the underlying metric activity is quiescent.
     """
-    h2_pos = h2.get('verdict') in ('SUPPORTED', 'WEAKLY_SUPPORTED')
+    h2_strong = (h2.get('verdict') == 'SUPPORTED')
+    h2_weak = (h2.get('verdict') == 'WEAKLY_SUPPORTED')
+    h2_pos = h2_strong or h2_weak
+
     extras_real = extras_diag.get('aggregate_classification') == 'REAL_PERSPECTIVE'
-    h1_pos = h1.get('verdict') in ('SUPPORTED', 'WEAKLY_SUPPORTED',
-                                    'SUPPORTED_FORM_HAS_INTERFERENCE_BASELINE_DOES_NOT')
+    h1_pos = h1.get('verdict') in (
+        'SUPPORTED', 'WEAKLY_SUPPORTED',
+        'SUPPORTED_FORM_HAS_INTERFERENCE_BASELINE_DOES_NOT',
+    )
+    h1_strong = h1.get('verdict') in (
+        'SUPPORTED', 'SUPPORTED_FORM_HAS_INTERFERENCE_BASELINE_DOES_NOT',
+    )
     h3_pos = h3.get('verdict') == 'SUPPORTED'
 
+    # Initial classification
     if not h2_pos:
         level = 'LEVEL_1_NO_PERSPECTIVE'
-    elif h2_pos and extras_real and (h1_pos or h3_pos):
+    elif h2_strong and extras_real and (h1_strong or h3_pos):
         level = 'LEVEL_3_DYNAMICAL_EFFECT'
-    elif h2_pos and extras_real:
+    elif (h1_strong or h3_pos) and h2_weak:
+        # Dynamic effect present but structural signal only weakly supports it
+        level = 'LEVEL_3_WEAK_STRUCTURAL_DYNAMIC'
+    elif h2_strong and extras_real:
         level = 'LEVEL_2_STRUCTURAL_PERSPECTIVE_NO_DYNAMIC_EFFECT'
     elif h2_pos and not extras_real:
         level = 'LEVEL_2_PARTIAL_STRUCTURAL_SIGNAL_ONLY'
     else:
         level = 'INCONCLUSIVE'
 
+    # MORPHO_ACTIVE caveat: channel must be ALIVE for perspective to be meaningful
+    morpho_caveat = None
+    if coupling_form == 'perspectival_MORPHO_ACTIVE' and morpho_channel is not None:
+        ch_status = morpho_channel.get('aggregate', 'UNKNOWN')
+        if ch_status != 'ALIVE':
+            # Downgrade classification with explicit caveat
+            morpho_caveat = (f"MORPHO_ACTIVE channel status = {ch_status}. "
+                             f"|∂_t h| is not dynamically alive — the perspectival "
+                             f"signal lacks its driving morphogenic activity. "
+                             f"Reported level should be read with caveat.")
+            level = level + '_CHANNEL_NOT_ALIVE'
+
     return {
         'level': level,
         'H1_supports_dynamic_effect': h1_pos,
+        'H1_strongly_supports': h1_strong,
         'H2_supports_structural_perspective': h2_pos,
+        'H2_strongly_supports': h2_strong,
+        'H2_weakly_supports': h2_weak,
         'H3_supports_F4_evolution': h3_pos,
         'extras_aggregate_real_perspective': extras_real,
         'H4_compression_kills_perspective_verdict': h4.get('verdict'),
+        'morpho_active_channel_caveat': morpho_caveat,
     }
