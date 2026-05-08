@@ -71,7 +71,11 @@ KNV_THRESHOLDS_6C_B = {
     'delta_min': 0.005,             # corridor floor (KNV 5)
     'delta_crit': 0.30,             # corridor ceiling (KNV 6)
     'STR_dtau_max': 0.005,          # stationary if ||dτ'/dt|| below this
-    'STR_var_min': 0.0001,          # AND var(τ') above this (alive, not dead)
+    'STR_var_min': 1e-7,            # AND var(τ') above this (alive, not dead)
+                                    # Calibrated for tau_T+tau_I projections
+                                    # which can have very small absolute scale
+                                    # while still being structurally informative.
+                                    # Below 1e-7 = floating-point dominated.
     'RSR_damping_min': 0.5,         # 50% amplitude decay over window for "damped"
     'RSR_gamma_max': 0.01,          # ||Γ″|| below this for "stabilising"
     'MV_excursion_steps_min': 3,    # min consecutive steps outside corridor for MV event
